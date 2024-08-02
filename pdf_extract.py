@@ -7,8 +7,20 @@ import pytz
 import datetime
 import argparse
 import shutil
+import base64
 import torch
 import numpy as np
+import requests
+from litellm import completion
+import litellm
+import openai
+from tenacity import retry, stop_after_attempt, wait_random_exponential
+from tenacity.nap import sleep
+from litellm.caching import Cache
+litellm.cache = Cache(type="disk")
+
+openai.api_key = os.getenv("OPENAI_API_KEY")
+litellm.set_verbose = True
 
 from paddleocr import draw_ocr
 from PIL import Image, ImageDraw, ImageFont
@@ -18,15 +30,15 @@ from ultralytics import YOLO
 from unimernet.common.config import Config
 import unimernet.tasks as tasks
 from unimernet.processors import load_processor
-from struct_eqtable import build_model
 
-from modules.latex2png import tex2pil, zhtext2pil
+from modules.latex2png import ImageChops, tex2pil, zhtext2pil
 from modules.extract_pdf import load_pdf_fitz
 from modules.layoutlmv3.model_init import Layoutlmv3_Predictor
 from modules.self_modify import ModifiedPaddleOCR
 from modules.post_process import get_croped_image, latex_rm_whitespace
 
-
+LATEX_STR_VALIDATION_PROMPT = "You are a LaTeX expert. Your job is to correct malformed latex. Only output the correct latex, even if the original is correct. Don't add any comments, just output the required latex string. Your response will directly be passed to the renderer, so if you add anything else you will fail. Give the correct latex, nothing else."
+LATEX_STR_VALIDATION_W_IMG_PROMPT = "You are a LaTeX expert. Your job is to validate and correct (potentially malformed) latex, given an image of what the rendered latex SHOULD look like.You will be provided an image, and a latex string. Your job is to check whether the string will match the provided image when rendered, and if it doesn't, provide a corrected latex string. Only output the correct latex, even if the original is correct. Don't add any comments, just output the required latex string. Your response will directly be passed to the renderer, so if you add anything else you will fail. Give the correct latex, nothing else."
 def mfd_model_init(weight):
     mfd_model = YOLO(weight)
     return mfd_model
@@ -48,11 +60,82 @@ def layout_model_init(weight):
     model = Layoutlmv3_Predictor(weight)
     return model
 
-def tr_model_init(weight, max_time, device='cuda'):
-    tr_model = build_model(weight, max_new_tokens=4096, max_time=max_time)
-    if device == 'cuda':
-        tr_model = tr_model.cuda()
-    return tr_model
+def validate_and_correct_latex(latex, image):
+    # First, try to render the LaTeX
+    try:
+        rendered_image = tex2pil(latex)
+        
+        # Compare the rendered image with the original image
+        original_image = Image.open(image)
+        
+        # Resize the rendered image to match the original image size
+        rendered_image = rendered_image.resize(original_image.size)
+        
+        # Calculate the difference between the images
+        diff = ImageChops.difference(original_image, rendered_image)
+        
+        # If the difference is significant, consider the LaTeX as potentially invalid
+        if diff.getbbox() is not None and (diff.getbbox()[2] - diff.getbbox()[0]) * (diff.getbbox()[3] - diff.getbbox()[1]) > 0.1 * original_image.size[0] * original_image.size[1]:
+            raise ValueError("Rendered image differs significantly from the original")
+        
+        return latex  # If no exception and images are similar, LaTeX is likely valid
+    except:
+        # If LaTeX is invalid or renders incorrectly, try to correct it using Mathpix API
+        try:
+            response = requests.post(
+                "https://api.mathpix.com/v3/text",
+                json={"src": latex, "formats": ["latex_simplified"]},
+                headers={
+                    "app_id": "YOUR_MATHPIX_APP_ID",
+                    "app_key": "YOUR_MATHPIX_APP_KEY",
+                }
+            )
+            corrected_latex = response.json()["latex_simplified"]
+            return corrected_latex
+        except:
+            # If Mathpix fails, use GPT-4 as a fallback
+            try:
+                response = requests.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    json={
+                        "model": "gpt-4o-mini",
+                        "messages": [
+                            {"role": "system", "content": LATEX_CORRECTION_PROMPT},
+                            {"role": "user", "content": latex}
+                        ]
+                    },
+                    headers={"Authorization": "Bearer YOUR_OPENAI_API_KEY"}
+                )
+                corrected_latex = response.json()["choices"][0]["message"]["content"]
+                return corrected_latex
+            except:
+                # If gpt-4o-mini fails, use gpt-4o with image
+                try:
+                    # Encode the image to base64
+                    with open(image, "rb") as image_file:
+                        encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
+                    
+                    from litellm import completion
+                    
+                    messages = [
+                        {"role": "system", "content": "You are a LaTeX expert. Correct the following LaTeX if it's invalid, using the provided image as reference:"},
+                        {"role": "user", "content": [
+                            {"type": "text", "text": latex},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded_image}"}}
+                        ]}
+                    ]
+                    
+                    response = completion(
+                        model="gpt-4-vision-preview",
+                        messages=messages,
+                        api_key="YOUR_OPENAI_API_KEY"
+                    )
+                    
+                    corrected_latex = response.choices[0].message.content
+                    return corrected_latex
+                except:
+                    # If all else fails, return the original LaTeX
+                    return latex
 
 class MathDataset(Dataset):
     def __init__(self, image_paths, transform=None):
@@ -98,7 +181,6 @@ if __name__ == '__main__':
     mfd_model = mfd_model_init(model_configs['model_args']['mfd_weight'])
     mfr_model, mfr_vis_processors = mfr_model_init(model_configs['model_args']['mfr_weight'], device=device)
     mfr_transform = transforms.Compose([mfr_vis_processors, ])
-    tr_model = tr_model_init(model_configs['model_args']['tr_weight'], max_time=model_configs['model_args']['table_max_time'], device=device)
     layout_model = layout_model_init(model_configs['model_args']['layout_weight'])
     ocr_model = ModifiedPaddleOCR(show_log=True)
     print(now.strftime('%Y-%m-%d %H:%M:%S'))
@@ -157,12 +239,13 @@ if __name__ == '__main__':
             imgs = imgs.to(device)
             output = mfr_model.generate({'image': imgs})
             mfr_res.extend(output['pred_str'])
-        for res, latex in zip(latex_filling_list, mfr_res):
-            res['latex'] = latex_rm_whitespace(latex)
+        for res, latex, img in zip(latex_filling_list, mfr_res, mf_image_list):
+            latex = latex_rm_whitespace(latex)
+            res['latex'] = validate_and_correct_latex(latex, img)
         b = time.time()
         print("formula nums:", len(mf_image_list), "mfr time:", round(b-a, 2))
             
-        # ocr and table recognition
+        # ocr
         for idx, image in enumerate(img_list):
             pil_img = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
             single_page_res = doc_layout_result[idx]['layout_dets']
@@ -193,19 +276,6 @@ if __name__ == '__main__':
                                 'score': round(score, 2),
                                 'text': text,
                             })
-                elif int(res['category_id']) == 5: # do table recognition
-                    xmin, ymin = int(res['poly'][0]), int(res['poly'][1])
-                    xmax, ymax = int(res['poly'][4]), int(res['poly'][5])
-                    crop_box = [xmin, ymin, xmax, ymax]
-                    cropped_img = pil_img.convert("RGB").crop(crop_box)
-                    start = time.time()
-                    with torch.no_grad():
-                        output = tr_model(cropped_img)
-                    end = time.time()
-                    if (end-start) > model_configs['model_args']['table_max_time']:
-                        res["timeout"] = True
-                    res["latex"] = output[0]
-
 
         output_dir = args.output
         os.makedirs(output_dir, exist_ok=True)
