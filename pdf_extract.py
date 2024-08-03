@@ -23,7 +23,7 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 litellm.set_verbose = True
 
 from paddleocr import draw_ocr
-from PIL import Image, ImageDraw, ImageFont
+from PIL import ImageChops, Image, ImageDraw, ImageFont
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader
 from ultralytics import YOLO
@@ -31,7 +31,7 @@ from unimernet.common.config import Config
 import unimernet.tasks as tasks
 from unimernet.processors import load_processor
 
-from modules.latex2png import ImageChops, tex2pil, zhtext2pil
+from modules.latex2png import tex2pil, zhtext2pil
 from modules.extract_pdf import load_pdf_fitz
 from modules.layoutlmv3.model_init import Layoutlmv3_Predictor
 from modules.self_modify import ModifiedPaddleOCR
@@ -60,13 +60,33 @@ def layout_model_init(weight):
     model = Layoutlmv3_Predictor(weight)
     return model
 
+
+def pil_image_to_base64(image, format="PNG"):
+    """
+    Encode a PIL Image to a base64 string.
+
+    Args:
+        image (PIL.Image.Image): The PIL image to encode.
+        format (str): The format to use for the image (e.g., "PNG", "JPEG").
+
+    Returns:
+        str: The base64 encoded string of the image.
+    """
+    buffered = BytesIO()
+    image.save(buffered, format=format)
+    img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+    return img_str
 def validate_and_correct_latex(latex, image):
     # First, try to render the LaTeX
+    if isinstance(image, str):
+        original_image = Image.open(image)
+    elif isinstance(image, Image.Image):
+        original_image = image
+    encoded_image = pil_image_to_base64(original_image)
     try:
-        rendered_image = tex2pil(latex)
+        rendered_image = latex_to_image(latex)
         
         # Compare the rendered image with the original image
-        original_image = Image.open(image)
         
         # Resize the rendered image to match the original image size
         rendered_image = rendered_image.resize(original_image.size)
@@ -82,6 +102,7 @@ def validate_and_correct_latex(latex, image):
     except:
         # If LaTeX is invalid or renders incorrectly, try to correct it using Mathpix API
         try:
+            raise ValueError("LaTeX is invalid or renders incorrectly")
             response = requests.post(
                 "https://api.mathpix.com/v3/text",
                 json={"src": latex, "formats": ["latex_simplified"]},
@@ -94,31 +115,31 @@ def validate_and_correct_latex(latex, image):
             return corrected_latex
         except:
             # If Mathpix fails, use GPT-4 as a fallback
-            try:
-                response = requests.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    json={
-                        "model": "gpt-4o-mini",
-                        "messages": [
-                            {"role": "system", "content": LATEX_CORRECTION_PROMPT},
-                            {"role": "user", "content": latex}
-                        ]
-                    },
-                    headers={"Authorization": "Bearer YOUR_OPENAI_API_KEY"}
+            try:                
+                messages = [
+                    {"role": "system", "content": LATEX_STR_VALIDATION_PROMPT},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": latex},
+                    ]}
+                ]
+                
+                response = completion(
+                    model="gpt-4o-mini",
+                    messages=messages
                 )
-                corrected_latex = response.json()["choices"][0]["message"]["content"]
-                return corrected_latex
+                
+                corrected_latex = response.choices[0].message.content
+                print ("GPT-4o-mini response: ", corrected_latex)
+                try:
+                    latex_to_image(corrected_latex)
+                    return corrected_latex
+                except:
+                    raise ValueError("GPT-4o-mini response is invalid")
             except:
                 # If gpt-4o-mini fails, use gpt-4o with image
                 try:
-                    # Encode the image to base64
-                    with open(image, "rb") as image_file:
-                        encoded_image = base64.b64encode(image_file.read()).decode('utf-8')
-                    
-                    from litellm import completion
-                    
                     messages = [
-                        {"role": "system", "content": "You are a LaTeX expert. Correct the following LaTeX if it's invalid, using the provided image as reference:"},
+                        {"role": "system", "content": LATEX_STR_VALIDATION_W_IMG_PROMPT},
                         {"role": "user", "content": [
                             {"type": "text", "text": latex},
                             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded_image}"}}
@@ -126,9 +147,8 @@ def validate_and_correct_latex(latex, image):
                     ]
                     
                     response = completion(
-                        model="gpt-4-vision-preview",
-                        messages=messages,
-                        api_key="YOUR_OPENAI_API_KEY"
+                        model="gpt-4o",
+                        messages=messages
                     )
                     
                     corrected_latex = response.choices[0].message.content
@@ -136,6 +156,7 @@ def validate_and_correct_latex(latex, image):
                 except:
                     # If all else fails, return the original LaTeX
                     return latex
+
 
 class MathDataset(Dataset):
     def __init__(self, image_paths, transform=None):
