@@ -1,4 +1,5 @@
 import os
+
 import cv2
 import json
 import yaml
@@ -39,9 +40,46 @@ from modules.post_process import get_croped_image, latex_rm_whitespace
 
 LATEX_STR_VALIDATION_PROMPT = "You are a LaTeX expert. Your job is to correct malformed latex. Only output the correct latex, even if the original is correct. Don't add any comments, just output the required latex string. Your response will directly be passed to the renderer, so if you add anything else you will fail. Give the correct latex, nothing else."
 LATEX_STR_VALIDATION_W_IMG_PROMPT = "You are a LaTeX expert. Your job is to validate and correct (potentially malformed) latex, given an image of what the rendered latex SHOULD look like.You will be provided an image, and a latex string. Your job is to check whether the string will match the provided image when rendered, and if it doesn't, provide a corrected latex string. Only output the correct latex, even if the original is correct. Don't add any comments, just output the required latex string. Your response will directly be passed to the renderer, so if you add anything else you will fail. Give the correct latex, nothing else."
+from PIL import Image
+from io import BytesIO
+import base64
+
+LATEX_STR_VALIDATION_PROMPT = "You are a LaTeX expert. Your job is to correct malformed latex. Only output the correct latex, even if the original is correct. Don't add any comments, just output the required latex string. Your response will directly be passed to the renderer, so if you add anything else you will fail. Give the correct latex, nothing else."
+LATEX_STR_VALIDATION_W_IMG_PROMPT = "You are a LaTeX expert. Your job is to validate and correct (potentially malformed) latex, given an image of what the rendered latex SHOULD look like.You will be provided an image, and a latex string. Your job is to check whether the string will match the provided image when rendered, and if it doesn't, provide a corrected latex string. Only output the correct latex, even if the original is correct. Don't add any comments, just output the required latex string. Your response will directly be passed to the renderer, so if you add anything else you will fail. Give the correct latex, nothing else."
 def mfd_model_init(weight):
     mfd_model = YOLO(weight)
     return mfd_model
+import matplotlib.pyplot as plt
+from PIL import Image
+from io import BytesIO
+def latex_to_image(latex_str, dpi=300):
+    """
+    Render a LaTeX string to a PNG image and return as a PIL Image object.
+
+    Args:
+        latex_str (str): The LaTeX string to render.
+        dpi (int): Dots per inch (resolution) of the output image.
+
+    Returns:
+        PIL.Image.Image: The rendered image as a PIL Image object.
+    """
+    # Create a figure and axis with no frame or axis
+    fig, ax = plt.subplots(figsize=(0.01, 0.01))
+    ax.text(0.5, 0.5, f"${latex_str}$", fontsize=20, ha='center', va='center')
+    ax.axis('off')
+    plt.gca().set_axis_off()
+    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+
+    # Save the figure to a buffer
+    buf = BytesIO()
+    plt.savefig(buf, format='png', dpi=dpi, transparent=True, bbox_inches='tight', pad_inches=0)
+    plt.close(fig)
+    
+    # Load the image from the buffer
+    buf.seek(0)
+    image = Image.open(buf)
+    
+    return image
 
 
 def mfr_model_init(weight_dir, device='cpu'):
