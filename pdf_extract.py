@@ -38,14 +38,12 @@ from modules.layoutlmv3.model_init import Layoutlmv3_Predictor
 from modules.self_modify import ModifiedPaddleOCR
 from modules.post_process import get_croped_image, latex_rm_whitespace
 
-LATEX_STR_VALIDATION_PROMPT = "You are a LaTeX expert. Your job is to correct malformed latex. Only output the correct latex, even if the original is correct. Don't add any comments, just output the required latex string. Your response will directly be passed to the renderer, so if you add anything else you will fail. Give the correct latex, nothing else."
-LATEX_STR_VALIDATION_W_IMG_PROMPT = "You are a LaTeX expert. Your job is to validate and correct (potentially malformed) latex, given an image of what the rendered latex SHOULD look like.You will be provided an image, and a latex string. Your job is to check whether the string will match the provided image when rendered, and if it doesn't, provide a corrected latex string. Only output the correct latex, even if the original is correct. Don't add any comments, just output the required latex string. Your response will directly be passed to the renderer, so if you add anything else you will fail. Give the correct latex, nothing else."
 from PIL import Image
 from io import BytesIO
 import base64
 
-LATEX_STR_VALIDATION_PROMPT = "You are a LaTeX expert. Your job is to correct malformed latex. Only output the correct latex, even if the original is correct. Don't add any comments, just output the required latex string. Your response will directly be passed to the renderer, so if you add anything else you will fail. Give the correct latex, nothing else."
-LATEX_STR_VALIDATION_W_IMG_PROMPT = "You are a LaTeX expert. Your job is to validate and correct (potentially malformed) latex, given an image of what the rendered latex SHOULD look like.You will be provided an image, and a latex string. Your job is to check whether the string will match the provided image when rendered, and if it doesn't, provide a corrected latex string. Only output the correct latex, even if the original is correct. Don't add any comments, just output the required latex string. Your response will directly be passed to the renderer, so if you add anything else you will fail. Give the correct latex, nothing else."
+LATEX_STR_VALIDATION_PROMPT = "You are a LaTeX expert. Your job is to correct malformed latex. Only output the correct latex, even if the original is correct. Don't add any comments, just output the required latex string. Your response will directly be passed to the renderer, so if you add anything else you will fail.  Do not provide the open/close latex tags like \\(\\) \\[\\] or $,$$. Give the correct latex, nothing else."
+LATEX_STR_VALIDATION_W_IMG_PROMPT = f"You are a LaTeX expert. Your job is to validate and correct (potentially malformed) latex, given an image of what the rendered latex SHOULD look like.You will be provided an image, and a latex string. Your job is to check whether the string will match the provided image when rendered, and if it doesn't, provide a corrected latex string. Only output the correct latex, even if the original is correct. Don't add any comments, just output the required latex string. Your response will directly be passed to the renderer, so if you add anything else you will fail. Do not provide the open/close latex tags like \\(\\) \\[\\] or $,$$. Give the correct latex, nothing else."
 def mfd_model_init(weight):
     mfd_model = YOLO(weight)
     return mfd_model
@@ -190,7 +188,12 @@ def validate_and_correct_latex(latex, image):
                     )
                     
                     corrected_latex = response.choices[0].message.content
-                    return corrected_latex
+                    try:
+                        latex_to_image(corrected_latex)
+                        return corrected_latex
+                    except:
+                        raise ValueError("GPT-4o response is invalid")
+
                 except:
                     # If all else fails, return the original LaTeX
                     return latex
