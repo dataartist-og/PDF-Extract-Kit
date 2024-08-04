@@ -86,8 +86,8 @@ def formula_in_text(mf_bbox, text_bbox):
         return False, left_box, right_box
     else:
         drop_origin = False
-        left_x = x1 - 1
-        right_x = x2 + 1
+        left_x = x1 
+        right_x = x2
         if x3 < x1 and x2 < x4:
             drop_origin = True
             left_box = np.array([text_bbox[0], [left_x, text_bbox[1][1]], [left_x, text_bbox[2][1]], text_bbox[3]]).astype('float32')
